@@ -198,7 +198,7 @@ async function main() {
   const catalog = createCatalog(config.codexPath, workspace)
   const state = localState(config.token)
   const project = {
-    catalog, initialProjectId: config.initialProjectId, savedModels: state.models,
+    catalog, savedModels: state.models,
     saveModels: models => state.save('models', models),
   }
   const telegram = telegramClient(config.token)

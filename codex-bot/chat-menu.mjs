@@ -19,7 +19,7 @@ function choiceRows(choices) {
   return rows
 }
 
-export function createChatMenu({ catalog, initialProjectId, send, edit, savedModels = {}, saveModels = () => {} }) {
+export function createChatMenu({ catalog, send, edit, savedModels = {}, saveModels = () => {} }) {
   let scope
   let selected
   let pending
@@ -152,14 +152,7 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
   return {
     async open() {
       messageId = undefined
-      pending = undefined
-      if (scope === undefined && initialProjectId) {
-        const list = await catalog.projects()
-        scope = list.find(project => project.id === initialProjectId)
-        initialProjectId = undefined
-      }
-      if (scope === undefined) await projects()
-      else await chats()
+      await projects()
     },
     action(callback) {
       if (callback.message?.message_id === messageId) return buttons.get(callback.data)

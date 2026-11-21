@@ -32,7 +32,7 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   }
   const handle = createBot({
     pairingCode: 'test-pair',
-    project: { catalog, initialProjectId: firstProject.id },
+    project: { catalog },
     async telegram(method, params) {
       const message = { method, message_id: messages.length + 1, ...params }
       messages.push(message)
@@ -64,6 +64,8 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   await send('/menu', 13)
   assert.equal(messages.length, 0)
   await send('/start test-pair')
+  assert.equal(messages.at(-1).text, 'Проекты Codex')
+  await press('Project A')
   assert.match(messages.at(-1).text, /Project A/)
   await send('Before choosing')
   assert.equal(jobs.length, 0)
@@ -89,7 +91,8 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   await settle()
   assert.equal(jobs[2].thread, 'standalone')
 
-  await press('← Проекты')
+  await send('/menu')
+  assert.equal(messages.at(-1).text, 'Проекты Codex')
   await press('Создать проект')
   await send('Test project')
   assert.deepEqual(requests, [])
@@ -121,7 +124,6 @@ test('short agent names share rows and long names keep their width', async () =>
     pairingCode: 'unused',
     pairedOwner: 42,
     project: {
-      initialProjectId: project.id,
       catalog: {
         projects: async () => [project],
         chats: async () => entries.map((title, i) => ({ projectId: project.id, thread: String(i), title })),
@@ -134,6 +136,12 @@ test('short agent names share rows and long names keep their width', async () =>
     },
   })
   await bot({ message: { from: { id: 42 }, chat: { id: 42, type: 'private' }, text: '/menu' } })
+  const projects = calls.at(-1)
+  assert.equal(projects.text, 'Проекты Codex')
+  await bot({
+    callback_query: { id: 'project', from: { id: 42 }, message: screenWithChat(projects),
+      data: projects.reply_markup.inline_keyboard[0][0].callback_data },
+  })
   const screen = calls.at(-1)
   assert.deepEqual(screen.reply_markup.inline_keyboard.map(row => row.map(button => button.text)), [
     entries.slice(0, 2), entries.slice(2, 4), entries.slice(4), ['Создать чат'], ['← Проекты'],

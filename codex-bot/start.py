@@ -54,7 +54,7 @@ def prompt_credentials():
     return {"token": token, "apiKey": key}
 
 
-def launch(credentials, initial_project_id=None):
+def launch(credentials):
     node = shutil.which("node")
     codex = shutil.which("codex") or (str(BUNDLED_CODEX) if BUNDLED_CODEX.is_file() else None)
     if not node or not codex:
@@ -64,7 +64,6 @@ def launch(credentials, initial_project_id=None):
         "apiKey": credentials["apiKey"],
         "codexPath": codex,
         "workspace": str(HERE.parent),
-        "initialProjectId": initial_project_id,
     }
     return subprocess.run([node, str(HERE / "bot.mjs")], input=json.dumps(config), text=True).returncode
 
@@ -72,14 +71,13 @@ def launch(credentials, initial_project_id=None):
 def main():
     parser = argparse.ArgumentParser(description="Личный бот Telegram для локального Codex.")
     parser.add_argument("--setup", action="store_true", help="Ввести и сохранить новые ключи.")
-    parser.add_argument("--project-id", help="Открыть указанный локальный проект первым.")
     args = parser.parse_args()
     try:
         credentials = None if args.setup else read_credentials()
         if credentials is None:
             credentials = prompt_credentials()
             store_credentials(credentials)
-        return launch(credentials, args.project_id)
+        return launch(credentials)
     except (RuntimeError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1

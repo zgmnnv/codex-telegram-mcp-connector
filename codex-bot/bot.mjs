@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createChatMenu } from './chat-menu.mjs'
+import { createChatMenu, modelSummary } from './chat-menu.mjs'
 import { createCatalog } from './codex-catalog.mjs'
 import { runCodex } from './codex-task.mjs'
 import { VoiceError, voiceTranscriber } from './voice.mjs'
@@ -58,13 +58,14 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
 
   function startTask(text, context) {
     active = true
-    const model = menu?.modelFor(context)
-    const details = menu ? `\nЧат: ${context.title}\nМодель: ${model?.label || 'По умолчанию'}` : ''
-    status = 'В работе.' + details
+    status = 'В работе.'
     void (async () => {
       try {
+        const settings = await menu?.settingsFor(context)
+        const details = settings ? `\nЧат: ${context.title}\n${modelSummary(settings)}` : ''
+        status = 'В работе.' + details
         await send('Принято. Запускаю Codex.' + details)
-        const result = await runTask(text, context, model?.id)
+        const result = await runTask(text, context, settings)
         status = result.ok ? 'Готово.' : 'Codex завершил задачу с ошибкой.'
         const description = result.text || (result.ok ? '' : 'Проверь вход в Codex и состояние проекта на Маке. Задание можно отправить ещё раз.')
         await sendResult(status, description, context)
@@ -178,16 +179,18 @@ function localState(token) {
       return fallback
     }
   }
-  const state = readJson(file, {})
+  let state = readJson(file, {})
   return {
     owner: Number.isSafeInteger(state.owner) && state.owner > 0 ? state.owner : undefined,
     models: state.models || {},
+    selection: state.selection || undefined,
     save(key, value) {
-      state[key] = value
+      const updated = { ...state, [key]: value }
       mkdirSync(directory, { mode: 0o700, recursive: true })
       const temporary = new URL(`bot-${randomBytes(8).toString('hex')}.tmp`, directory)
-      writeFileSync(temporary, JSON.stringify(state) + '\n', { mode: 0o600, flag: 'wx' })
+      writeFileSync(temporary, JSON.stringify(updated) + '\n', { mode: 0o600, flag: 'wx' })
       renameSync(temporary, file)
+      state = updated
     },
   }
 }
@@ -200,6 +203,8 @@ async function main() {
   const project = {
     catalog, savedModels: state.models,
     saveModels: models => state.save('models', models),
+    savedSelection: state.selection,
+    saveSelection: selection => state.save('selection', selection),
   }
   const telegram = telegramClient(config.token)
   const pairingCode = randomBytes(8).toString('hex')
@@ -214,10 +219,11 @@ async function main() {
     saveOwner: owner => state.save('owner', owner),
     transcribe: voiceTranscriber(config, telegram),
     project,
-    async runTask(text, context, model) {
+    async runTask(text, context, settings) {
       const projectDir = context?.thread && await catalog.resumePath(context)
       if (!projectDir) return { ok: false, text: 'Чат занят или недоступен. Выбери активный чат в /menu.' }
-      return runCodex(config.codexPath, text, context.thread, { projectDir, model })
+      const { model, effort, serviceTier } = settings
+      return runCodex(config.codexPath, text, context.thread, { projectDir, model, effort, serviceTier })
     },
   })
   let offset = 0

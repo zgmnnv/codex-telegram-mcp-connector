@@ -1,11 +1,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createBot } from './bot.mjs'
+import { createChatMenu } from './chat-menu.mjs'
+
+const exampleModel = {
+  model: 'example', displayName: 'Example model', isDefault: true,
+  defaultReasoningEffort: 'medium',
+  supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'high' }],
+  serviceTiers: [{ id: 'priority', name: 'Fast' }],
+}
 
 test('bound owner can choose an agent, set a model, and create after confirming', async () => {
   const messages = []
   const requests = []
   const jobs = []
+  let savedSelection
+  let savedModels
   const owner = 42
   const firstProject = { id: 'project-a', name: 'Project A', roots: [] }
   const projects = [firstProject]
@@ -16,7 +26,8 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   const catalog = {
     projects: async () => projects,
     chats: async id => chats.get(id) || [],
-    models: async () => ({ data: [{ model: 'example', displayName: 'Example model' }] }),
+    models: async () => ({ data: [exampleModel] }),
+    modelOptions: async () => [exampleModel],
     async createProject(name) {
       requests.push({ type: 'project', name })
       const project = { id: 'new-project', name, roots: [] }
@@ -32,15 +43,19 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   }
   const handle = createBot({
     pairingCode: 'test-pair',
-    project: { catalog },
+    project: {
+      catalog,
+      saveSelection(selection) { savedSelection = selection },
+      saveModels(models) { savedModels = models },
+    },
     async telegram(method, params) {
       const message = { method, message_id: messages.length + 1, ...params }
       messages.push(message)
       return message
     },
     transcribe: async () => 'Test voice',
-    async runTask(text, context, model) {
-      jobs.push({ text, thread: context.thread, model })
+    async runTask(text, context, { model, effort, serviceTier }) {
+      jobs.push({ text, thread: context.thread, model, effort, serviceTier })
       return { ok: true, text: 'Result' }
     },
   })
@@ -72,27 +87,42 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   await press('Agent A', 13)
   assert.equal(jobs.length, 0)
   await press('Agent A')
+  assert.equal(savedSelection.thread, 'a')
   await press('Модель')
+  assert.match(messages.at(-1).text, /Уровень: Средний\nСкорость: Стандартная/)
+  await press('Сменить модель')
   await press('Example model')
+  await press('Уровень')
+  await press('Высокий')
+  await press('Скорость')
+  await press('Fast')
+  assert.match(messages.at(-1).text, /Уровень: Высокий\nСкорость: Fast/)
+  assert.deepEqual(savedModels.a, { id: 'example', label: 'Example model', effort: 'high', serviceTier: 'priority' })
+  await send('/menu')
+  assert.equal(messages.at(-1).text, 'Проекты Codex\nАктивный чат: Agent A')
   await send('Check UI')
   await settle()
-  assert.deepEqual(jobs[0], { text: 'Check UI', thread: 'a', model: 'example' })
+  assert.deepEqual(jobs[0], { text: 'Check UI', thread: 'a', model: 'example', effort: 'high', serviceTier: 'priority' })
+  const restored = createChatMenu({ catalog, savedSelection, savedModels })
+  assert.equal(restored.current().thread, 'a')
+  assert.equal((await restored.settingsFor(restored.current())).serviceTier, 'priority')
+
   await handle({ message: { from: { id: owner }, chat: { id: owner, type: 'private' }, message_id: 3, voice: { file_id: 'fixture' } } })
   await press('✍️ Расшифровать')
   assert.equal(jobs.length, 1)
 
-  await press('← Проекты')
   await press('Вне проектов')
   await press('Standalone')
   await press('Отправить в Codex')
   await settle()
-  assert.deepEqual(jobs[1], { text: 'Test voice', thread: 'a', model: 'example' })
+  assert.deepEqual(jobs[1], { text: 'Test voice', thread: 'a', model: 'example', effort: 'high', serviceTier: 'priority' })
   await send('Standalone task')
   await settle()
   assert.equal(jobs[2].thread, 'standalone')
+  assert.equal(jobs[2].serviceTier, 'default')
 
   await send('/menu')
-  assert.equal(messages.at(-1).text, 'Проекты Codex')
+  assert.equal(messages.at(-1).text, 'Проекты Codex\nАктивный чат: Standalone')
   await press('Создать проект')
   await send('Test project')
   assert.deepEqual(requests, [])
@@ -158,3 +188,21 @@ test('short agent names share rows and long names keep their width', async () =>
 function screenWithChat(screen) {
   return { message_id: screen.message_id, chat: { id: 42, type: 'private' } }
 }
+
+test('opening projects clears a saved chat that is no longer active', async () => {
+  let saved
+  let title
+  const menu = createChatMenu({
+    catalog: { projects: async () => [], chats: async () => [] },
+    savedSelection: { thread: 'old-chat', projectId: 'project-a', title: 'Old chat' },
+    saveSelection(selection) { saved = selection },
+    async send(text) {
+      title = text
+      return { message_id: 1 }
+    },
+  })
+  await menu.open()
+  assert.equal(title, 'Проекты Codex')
+  assert.equal(menu.current(), undefined)
+  assert.equal(saved, null)
+})

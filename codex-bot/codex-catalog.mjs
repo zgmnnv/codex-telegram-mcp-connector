@@ -110,6 +110,9 @@ export function createCatalog(codexPath, defaultWorkspace) {
     async models(cursor) {
       return query('model/list', { includeHidden: false, limit: 8, cursor })
     },
+    async modelOptions() {
+      return execute(request => allPages(request, 'model/list', { includeHidden: false }))
+    },
     async createProject(name, requestId = randomUUID()) {
       const { project } = await query('project/create', { name, roots: [], idempotencyKey: requestId })
       return project

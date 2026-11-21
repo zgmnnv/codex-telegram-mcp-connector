@@ -5,13 +5,16 @@ import { fileURLToPath } from 'node:url'
 
 const project = fileURLToPath(new URL('../../', import.meta.url))
 
-export async function runCodex(codexPath, prompt, previousThread, { projectDir = project, model } = {}) {
+export async function runCodex(codexPath, prompt, previousThread, { projectDir = project, model, effort, serviceTier } = {}) {
   const args = [
     '--no-daemon', '--cd', projectDir,
     '--sandbox', 'read-only', '--ask-for-approval', 'never',
     '--config', 'features.apps=false', '--config', 'mcp_servers={}',
-    'exec',
   ]
+  if (effort) args.push('--config', `model_reasoning_effort=${JSON.stringify(effort)}`)
+  if (serviceTier) args.push('--config', `service_tier=${JSON.stringify(serviceTier)}`)
+  if (serviceTier && serviceTier !== 'default') args.push('--config', 'features.fast_mode=true')
+  args.push('exec')
   if (previousThread) args.push('resume', previousThread)
   if (model) args.push('--model', model)
   args.push('--ignore-user-config', '--json', '-')

@@ -29,6 +29,12 @@ def staged_match(path):
 
 
 def main():
+    for name in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+        identity = git("var", name)
+        match = re.search(rb"<([^<>]+)>", identity)
+        if not match or not match.group(1).lower().endswith(b"@users.noreply.github.com"):
+            print("Настрой GitHub noreply для автора и коммитера этого репозитория.")
+            return 1
     changed = git("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z").decode().split("\0")
     blocked = sum(staged_match(path) for path in changed if path)
     if blocked:

@@ -1,11 +1,10 @@
+private/
 .env
 .env.*
-!.env.example
-sessions/
 *.session
 *.session-journal
-*.db
-*.db-shm
-*.db-wal
+*.sqlite*
+*.db*
 *.log
+__pycache__/
 .DS_Store

@@ -106,3 +106,47 @@ test('bound owner can choose an agent, set a model, and create after confirming'
   await settle()
   assert.equal(jobs[3].thread, 'new-chat')
 })
+
+test('short agent names share rows and long names keep their width', async () => {
+  const project = { id: 'project-a', name: 'Project A' }
+  const entries = [
+    'Sample Test Agent 1',
+    'Sample Test Agent 2',
+    'Sample Test Agent 3',
+    'Sample Test Agent 4',
+    'A long descriptive agent name that needs a full-width button',
+  ]
+  const calls = []
+  const bot = createBot({
+    pairingCode: 'unused',
+    pairedOwner: 42,
+    project: {
+      initialProjectId: project.id,
+      catalog: {
+        projects: async () => [project],
+        chats: async () => entries.map((title, i) => ({ projectId: project.id, thread: String(i), title })),
+      },
+    },
+    async telegram(method, params) {
+      const message = { method, message_id: calls.length + 1, ...params }
+      calls.push(message)
+      return message
+    },
+  })
+  await bot({ message: { from: { id: 42 }, chat: { id: 42, type: 'private' }, text: '/menu' } })
+  const screen = calls.at(-1)
+  assert.deepEqual(screen.reply_markup.inline_keyboard.map(row => row.map(button => button.text)), [
+    entries.slice(0, 2), entries.slice(2, 4), entries.slice(4), ['Создать чат'], ['← Проекты'],
+  ])
+  await bot({
+    callback_query: { id: 'selection', from: { id: 42 }, message: screenWithChat(screen),
+      data: screen.reply_markup.inline_keyboard[0][0].callback_data },
+  })
+  const selected = calls.at(-1)
+  assert.deepEqual(selected.reply_markup.inline_keyboard[0].map(button => button.text), ['✓ ' + entries[0], entries[1]])
+  assert.deepEqual(selected.reply_markup.inline_keyboard.at(-2).map(button => button.text), ['Модель', 'Создать чат'])
+})
+
+function screenWithChat(screen) {
+  return { message_id: screen.message_id, chat: { id: 42, type: 'private' } }
+}

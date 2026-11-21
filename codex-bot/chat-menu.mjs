@@ -3,6 +3,21 @@ import { randomBytes, randomUUID } from 'node:crypto'
 const limit = 8
 const short = (text, length = 50) => Array.from(text).slice(0, length).join('')
 const choice = (label, run) => ({ label, run })
+const labelLength = ({ label }) => Array.from(label.replace(/^✓ /, '')).length
+
+function choiceRows(choices) {
+  const rows = []
+  for (const item of choices) {
+    const last = rows.at(-1)
+    if (last?.length === 1 && labelLength(last[0]) <= 20 && labelLength(item) <= 20
+      && labelLength(last[0]) + labelLength(item) <= 38) {
+      last.push(item)
+    } else {
+      rows.push([item])
+    }
+  }
+  return rows
+}
 
 export function createChatMenu({ catalog, initialProjectId, send, edit, savedModels = {}, saveModels = () => {} }) {
   let scope
@@ -17,11 +32,11 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
 
   async function screen(title, rows) {
     const actions = new Map()
-    const inline_keyboard = rows.map(({ label, run }) => {
+    const inline_keyboard = rows.map(row => row.map(({ label, run }) => {
       const id = `menu:${randomBytes(8).toString('hex')}`
       actions.set(id, run)
-      return [{ text: short(label, 60), callback_data: id }]
-    })
+      return { text: short(label, 60), callback_data: id }
+    }))
     const markup = { inline_keyboard }
     if (messageId) await edit(messageId, title, markup)
     else messageId = (await send(title, { reply_markup: markup })).message_id
@@ -29,8 +44,10 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
   }
 
   function pagination(rows, amount, page, render) {
-    if (page > 0) rows.push(choice('← Предыдущая страница', () => render(page - 1)))
-    if ((page + 1) * limit < amount) rows.push(choice('Следующая страница →', () => render(page + 1)))
+    const navigation = []
+    if (page > 0) navigation.push(choice('← Назад', () => render(page - 1)))
+    if ((page + 1) * limit < amount) navigation.push(choice('Дальше →', () => render(page + 1)))
+    if (navigation.length) rows.push(navigation)
   }
 
   async function projects(page = 0) {
@@ -38,15 +55,16 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
     selected = undefined
     pending = undefined
     const data = await catalog.projects()
-    const rows = data.slice(page * limit, (page + 1) * limit).map(project => choice(project.name, async () => {
+    const choices = data.slice(page * limit, (page + 1) * limit).map(project => choice(project.name, async () => {
       scope = project
       await chats()
     }))
+    const rows = choiceRows(choices)
     pagination(rows, data.length, page, projects)
-    rows.push(choice('Вне проектов', async () => {
+    rows.push([choice('Вне проектов', async () => {
       scope = null
       await chats()
-    }), choice('Создать проект', () => begin('project')))
+    }), choice('Создать проект', () => begin('project'))])
     await screen('Проекты Codex', rows)
   }
 
@@ -54,16 +72,18 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
     pending = undefined
     const data = await catalog.chats(scope?.id ?? null)
     if (selected && !data.some(entry => entry.thread === selected.thread)) selected = undefined
-    const rows = data.slice(page * limit, (page + 1) * limit).map(entry => choice(
+    const choices = data.slice(page * limit, (page + 1) * limit).map(entry => choice(
       (selected?.thread === entry.thread ? '✓ ' : '') + entry.title,
       async () => {
         selected = entry
         await chats(page)
       },
     ))
+    const rows = choiceRows(choices)
     pagination(rows, data.length, page, chats)
-    if (selected) rows.push(choice('Модель', () => modelPage()))
-    rows.push(choice('Создать чат', () => begin('chat')), choice('← Проекты', () => projects()))
+    const actions = [choice('Создать чат', () => begin('chat'))]
+    if (selected) actions.unshift(choice('Модель', () => modelPage()))
+    rows.push(actions, [choice('← Проекты', () => projects())])
     const subtitle = selected
       ? `Чат: ${short(selected.title, 120)}\nМодель: ${modelFor(selected)?.label || 'По умолчанию'}`
       : data.length ? 'Выбери активный чат.' : 'Активных чатов пока нет.'
@@ -79,9 +99,15 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
 
   async function modelPage(cursor) {
     const page = await catalog.models(cursor)
-    const rows = page.data.map(model => choice(model.displayName, () => chooseModel({ id: model.model, label: model.displayName })))
-    if (page.nextCursor) rows.push(choice('Следующая страница →', () => modelPage(page.nextCursor)))
-    rows.push(choice('По умолчанию', () => chooseModel()), choice('← К чатам', () => chats()))
+    const rows = choiceRows(page.data.map(model => choice(model.displayName, () => chooseModel({ id: model.model, label: model.displayName }))))
+    if (page.nextCursor) {
+      const navigation = [choice('Дальше →', () => modelPage(page.nextCursor))]
+      if (cursor) navigation.unshift(choice('← К началу', () => modelPage()))
+      rows.push(navigation)
+    } else if (cursor) {
+      rows.push([choice('← К началу', () => modelPage())])
+    }
+    rows.push([choice('По умолчанию', () => chooseModel()), choice('← К чатам', () => chats())])
     await screen(`Модель для «${short(selected.title, 120)}»`, rows)
   }
 
@@ -89,7 +115,7 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
 
   async function begin(kind) {
     pending = { kind, requestId: randomUUID() }
-    await screen(kind === 'project' ? 'Напиши название проекта.' : `Напиши название чата в «${scopeName()}».`, [choice('Отмена', back)])
+    await screen(kind === 'project' ? 'Напиши название проекта.' : `Напиши название чата в «${scopeName()}».`, [[choice('Отмена', back)]])
   }
 
   async function acceptTitle(text) {
@@ -105,7 +131,7 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
     const draft = { ...pending, title: text }
     pending = draft
     const type = draft.kind === 'project' ? 'проект' : 'чат'
-    await screen(`Создать ${type} «${text}»?`, [
+    await screen(`Создать ${type} «${text}»?`, [[
       choice('Создать', async () => {
         if (pending !== draft) return
         if (draft.kind === 'project') {
@@ -119,7 +145,7 @@ export function createChatMenu({ catalog, initialProjectId, send, edit, savedMod
         await chats()
       }),
       choice('Отмена', back),
-    ])
+    ]])
     return true
   }
 

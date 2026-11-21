@@ -30,10 +30,10 @@ def read_credentials():
 def validate_credentials(credentials):
     if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]{20,}", credentials.get("token", "")):
         raise ValueError("Проверь токен от BotFather.")
-    if credentials.get("provider") not in ("yandex", "groq", "openrouter"):
-        raise ValueError("Укажи yandex, groq или openrouter.")
+    if credentials.get("provider", "yandex") != "yandex":
+        raise ValueError("Введи ключ Яндекс SpeechKit через --setup.")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{20,512}", credentials.get("apiKey", "")):
-        raise ValueError("Проверь ключ сервиса распознавания.")
+        raise ValueError("Проверь ключ Яндекс SpeechKit.")
 
 
 def store_credentials(credentials):
@@ -50,9 +50,8 @@ def prompt_credentials():
     if not sys.stdin.isatty():
         raise RuntimeError("Для первого входа запусти установку ключей в Терминале.")
     token = getpass.getpass("Токен Telegram-бота: ").strip()
-    provider = input("Сервис распознавания (Enter для yandex): ").strip().lower() or "yandex"
-    key = getpass.getpass(f"Ключ {provider}: ").strip()
-    return {"token": token, "provider": provider, "apiKey": key}
+    key = getpass.getpass("Ключ Яндекс SpeechKit: ").strip()
+    return {"token": token, "apiKey": key}
 
 
 def launch(credentials, initial_project_id=None):
@@ -61,7 +60,8 @@ def launch(credentials, initial_project_id=None):
     if not node or not codex:
         raise RuntimeError("Для запуска нужны Node.js 22+ и Codex.")
     config = {
-        **credentials,
+        "token": credentials["token"],
+        "apiKey": credentials["apiKey"],
         "codexPath": codex,
         "workspace": str(HERE.parent),
         "initialProjectId": initial_project_id,

@@ -19,8 +19,15 @@ export async function runCodex(codexPath, prompt, previousThread, { projectDir =
   if (model) args.push('--model', model)
   args.push('--ignore-user-config', '--json', '-')
 
-  const child = spawn(codexPath, args, { cwd: projectDir, stdio: ['pipe', 'pipe', 'ignore'] })
+  const child = spawn(codexPath, args, { cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'] })
   const finished = once(child, 'close').catch(() => [null])
+  let threadBusy = false
+  const diagnostics = createInterface({ input: child.stderr })
+  diagnostics.on('line', line => {
+    if (previousThread && line.includes(`thread ${previousThread} already has an active writer`)) {
+      threadBusy = true
+    }
+  })
   child.stdin.on('error', () => {})
   child.stdin.end(prompt)
 
@@ -40,5 +47,6 @@ export async function runCodex(codexPath, prompt, previousThread, { projectDir =
     if (event.type === 'turn.completed') completed = true
   }
   const [code] = await finished
+  if (code !== 0 && threadBusy) return { thread, ok: false, text, failure: 'thread-busy' }
   return { thread, ok: code === 0 && completed, text }
 }

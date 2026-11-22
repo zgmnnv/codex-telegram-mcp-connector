@@ -66,6 +66,11 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
         status = 'В работе.' + details
         await send('Принято. Запускаю Codex.' + details)
         const result = await runTask(text, context, settings)
+        if (result.failure === 'thread-busy') {
+          status = 'Чат занят другой сессией Codex.'
+          await sendResult(status, 'Выбери другой чат через /menu.', context)
+          return
+        }
         status = result.ok ? 'Готово.' : 'Codex завершил задачу с ошибкой.'
         const description = result.text || (result.ok ? '' : 'Проверь вход в Codex и состояние проекта на Маке. Задание можно отправить ещё раз.')
         await sendResult(status, description, context)

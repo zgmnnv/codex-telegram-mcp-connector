@@ -7,6 +7,15 @@ import { createCatalog } from './codex-catalog.mjs'
 import { runCodex } from './codex-task.mjs'
 import { VoiceError, voiceTranscriber } from './voice.mjs'
 
+const taskFailures = {
+  'thread-unavailable': 'Чат занят или недоступен. Выбери доступный чат через /menu.',
+  'workspace-untrusted': 'Codex не запустил задачу из этой папки. Выбери чат с рабочей папкой Git-проекта через /menu.',
+  authorization: 'Codex сообщил об ошибке авторизации. Проверь вход в Codex на Маке и повтори задачу.',
+  'rate-limit': 'Сработал лимит запросов Codex. Проверь лимит в Codex и повтори задачу позже.',
+  'codex-start': 'Бот не смог запустить Codex CLI. Проверь, что CLI запускается на Маке.',
+  'codex-failed': 'Codex завершил задачу с ошибкой. Подробности проверь в Codex на Маке.',
+}
+
 function telegramClient(token) {
   return async (method, params = {}) => {
     const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -82,9 +91,9 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
           await sendResult(status, 'Выбери другой чат через /menu.', context)
           return
         }
-        status = result.ok ? 'Готово.' : 'Codex завершил задачу с ошибкой.'
-        const description = result.text || (result.ok ? '' : 'Проверь вход в Codex и состояние проекта на Маке. Задание можно отправить ещё раз.')
-        await sendResult(status, description, context)
+        const failure = result.failure ?? 'thread-unavailable'
+        status = result.ok ? 'Готово. Ответ в Codex.' : taskFailures[failure] ?? taskFailures['codex-failed']
+        await sendResult(status, '', context)
       } catch {
         task.finished = true
         status = 'Не удалось выполнить задачу или доставить результат.'

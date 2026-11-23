@@ -39,6 +39,50 @@ exit 1
   assert.equal(messages.at(-1), 'Чат занят другой сессией Codex.')
 })
 
+test('reports only locally written task statuses even when Codex emits text and raw diagnostics', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'codex-status-test-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cli = join(directory, 'codex')
+  const marker = 'EXAMPLE_PRIVATE_OUTPUT'
+  const answer = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: marker } })
+  const cases = [
+    {
+      output: `printf '%s\\n' '${answer}' '{"type":"turn.completed"}'\nexit 0`,
+      status: 'Готово. Ответ в Codex.',
+    },
+    {
+      output: `printf '%s\\n' '${answer}' '{"type":"turn.failed","error":{"message":"unexpected status 429 ${marker}"}}'\nexit 1`,
+      status: 'Сработал лимит запросов Codex. Проверь лимит в Codex и повтори задачу позже.',
+    },
+    {
+      output: `printf '%s\\n' 'Unrecognized error with ${marker}' >&2\nexit 1`,
+      status: 'Codex завершил задачу с ошибкой. Подробности проверь в Codex на Маке.',
+    },
+  ]
+  for (const sample of cases) {
+    await writeFile(cli, `#!/bin/sh\ncat >/dev/null\n${sample.output}\n`, { mode: 0o700 })
+    const messages = []
+    const completed = Promise.withResolvers()
+    const bot = createBot({
+      pairedOwner: 42,
+      async telegram(method, params) {
+        if (method === 'sendMessage') {
+          messages.push(params.text)
+          if (messages.length === 2) completed.resolve(params.text)
+        }
+        return { message_id: messages.length }
+      },
+      runTask: text => runCodex(cli, text, undefined, { projectDir: directory }),
+    })
+    const send = text => bot({ message: { chat: { id: 42, type: 'private' }, from: { id: 42 }, text } })
+    await send('Run example task')
+    assert.equal(await completed.promise, sample.status)
+    await send('/status')
+    assert.equal(messages.at(-1), sample.status)
+    assert.equal(messages.some(message => message.includes(marker)), false)
+  }
+})
+
 test('only the current task can be stopped by the bound owner', async () => {
   const calls = []
   const tasks = []

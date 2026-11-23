@@ -89,3 +89,71 @@ test('only the current task can be stopped by the bound owner', async () => {
   await send('/status')
   assert.equal(lastMessage().text, 'Задача остановлена.')
 })
+
+test('releases only after the owner confirms the selected chat', async () => {
+  const context = { thread: 'example-thread', title: 'Example chat', projectId: 'example-project' }
+  const calls = []
+  const releases = []
+  const finished = Promise.withResolvers()
+  const model = {
+    model: 'sample', displayName: 'Example model', isDefault: true,
+    defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }],
+  }
+  const bot = createBot({
+    pairedOwner: 42,
+    project: { savedSelection: context, catalog: { modelOptions: async () => [model] } },
+    recovery: {
+      holds: async chat => chat.thread === context.thread,
+      async release(chat) {
+        releases.push(chat)
+        await finished.promise
+        return true
+      },
+    },
+    runTask: async () => ({ failure: 'thread-busy' }),
+    async telegram(method, params) {
+      const entry = { method, ...params, message_id: params.message_id ?? calls.length + 1 }
+      calls.push(entry)
+      return entry
+    },
+  })
+  const chat = { id: 42, type: 'private' }
+  const send = text => bot({ message: { chat, from: { id: 42 }, text } })
+  const tap = (message, data, id = 42) => bot({
+    callback_query: { id: 'tap', from: { id }, message: { chat, message_id: message.message_id }, data },
+  })
+  const lastMessage = () => calls.findLast(entry => entry.method === 'sendMessage')
+  const settle = () => new Promise(resolve => setImmediate(resolve))
+  const actions = message => message.reply_markup.inline_keyboard[0]
+
+  await send('Example task')
+  await settle()
+  const offer = lastMessage()
+  const trigger = actions(offer)[0]
+  assert.equal(trigger.text, 'Освободить чат')
+  await tap(offer, trigger.callback_data.replace('release:', 'release-confirm:'))
+  assert.deepEqual(releases, [])
+
+  await tap(offer, trigger.callback_data)
+  const confirmation = lastMessage()
+  assert.match(confirmation.text, /Example chat.*всех активных задач/)
+  const [confirm, cancel] = actions(confirmation)
+  await tap(confirmation, confirm.callback_data, 13)
+  assert.deepEqual(releases, [])
+  await tap(confirmation, cancel.callback_data)
+  await tap(confirmation, confirm.callback_data)
+  assert.deepEqual(releases, [])
+
+  await send('Another example task')
+  await settle()
+  const nextOffer = lastMessage()
+  await tap(nextOffer, actions(nextOffer)[0].callback_data)
+  const nextConfirmation = lastMessage()
+  await tap(nextConfirmation, actions(nextConfirmation)[0].callback_data)
+  assert.deepEqual(releases, [context])
+  await send('/status')
+  assert.equal(lastMessage().text, 'Жду завершения задач Codex.')
+  finished.resolve()
+  await settle()
+  assert.match(lastMessage().text, /^Чат освобождён\./)
+})

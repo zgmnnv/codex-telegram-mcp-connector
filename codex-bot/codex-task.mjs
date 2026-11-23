@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url'
 
 const project = fileURLToPath(new URL('../../', import.meta.url))
 
-export async function runCodex(codexPath, prompt, previousThread, { projectDir = project, model, effort, serviceTier } = {}) {
+export async function runCodex(codexPath, prompt, previousThread, {
+  projectDir = project, model, effort, serviceTier, signal,
+} = {}) {
+  if (signal?.aborted) return { thread: previousThread, ok: false, text: '', failure: 'cancelled' }
+
   const args = [
     '--no-daemon', '--cd', projectDir,
     '--sandbox', 'read-only', '--ask-for-approval', 'never',
@@ -21,6 +25,14 @@ export async function runCodex(codexPath, prompt, previousThread, { projectDir =
 
   const child = spawn(codexPath, args, { cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'] })
   const finished = once(child, 'close').catch(() => [null])
+  let interrupted = false
+  let forceStop
+  const interrupt = () => {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    interrupted = child.kill('SIGINT')
+    if (interrupted) forceStop = setTimeout(() => child.kill('SIGKILL'), 5_000)
+  }
+  signal?.addEventListener('abort', interrupt, { once: true })
   let threadBusy = false
   const diagnostics = createInterface({ input: child.stderr })
   diagnostics.on('line', line => {
@@ -47,6 +59,10 @@ export async function runCodex(codexPath, prompt, previousThread, { projectDir =
     if (event.type === 'turn.completed') completed = true
   }
   const [code] = await finished
-  if (code !== 0 && threadBusy) return { thread, ok: false, text, failure: 'thread-busy' }
-  return { thread, ok: code === 0 && completed, text }
+  clearTimeout(forceStop)
+  signal?.removeEventListener('abort', interrupt)
+  const ok = code === 0 && completed
+  if (!ok && threadBusy) return { thread, ok: false, text, failure: 'thread-busy' }
+  if (!ok && interrupted) return { thread, ok: false, text: '', failure: 'cancelled' }
+  return { thread, ok, text }
 }

@@ -38,3 +38,54 @@ exit 1
   await send('/status')
   assert.equal(messages.at(-1), 'Чат занят другой сессией Codex.')
 })
+
+test('only the current task can be stopped by the bound owner', async () => {
+  const calls = []
+  const tasks = []
+  const bot = createBot({
+    pairedOwner: 42,
+    async telegram(method, params) {
+      const entry = { method, ...params, message_id: params.message_id ?? calls.length + 1 }
+      calls.push(entry)
+      return entry
+    },
+    async runTask(text, _context, _settings, signal) {
+      tasks.push({ text, signal })
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+      return { failure: 'cancelled' }
+    },
+  })
+  const chat = { id: 42, type: 'private' }
+  const send = text => bot({ message: { chat, from: { id: 42 }, text } })
+  const tap = (message, id = 42) => bot({
+    callback_query: {
+      id: 'tap', from: { id }, message: { chat, message_id: message.message_id },
+      data: message.reply_markup.inline_keyboard[0][0].callback_data,
+    },
+  })
+  const lastMessage = () => calls.findLast(entry => entry.method === 'sendMessage')
+
+  await send('First example task')
+  const first = lastMessage()
+  assert.equal(first.reply_markup.inline_keyboard[0][0].text, 'Остановить задачу')
+  await tap(first, 13)
+  assert.equal(tasks[0].signal.aborted, false)
+  await tap({ ...first, message_id: first.message_id + 1 })
+  assert.equal(tasks[0].signal.aborted, false)
+  await tap(first)
+  assert.equal(tasks[0].signal.aborted, true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(lastMessage().text, 'Задача остановлена.')
+  assert.ok(calls.some(entry => entry.method === 'editMessageReplyMarkup'
+    && entry.message_id === first.message_id && entry.reply_markup.inline_keyboard.length === 0))
+
+  await send('Second example task')
+  const second = lastMessage()
+  await tap(first)
+  assert.equal(tasks[1].signal.aborted, false)
+  await tap(second)
+  assert.equal(tasks[1].signal.aborted, true)
+  await new Promise(resolve => setImmediate(resolve))
+  await send('/status')
+  assert.equal(lastMessage().text, 'Задача остановлена.')
+})

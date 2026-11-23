@@ -29,7 +29,7 @@ function telegramClient(token) {
 
 export function createBot({ telegram, transcribe, runTask, pairingCode, project, pairedOwner, saveOwner = () => {} }) {
   let owner = pairedOwner
-  let active = false
+  let active
   let status = 'Заданий пока нет.'
   const drafts = new Map()
   const threads = new Map()
@@ -57,15 +57,26 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
   }
 
   function startTask(text, context) {
-    active = true
+    const task = { id: randomBytes(12).toString('hex'), controller: new AbortController() }
+    const { signal } = task.controller
+    active = task
     status = 'В работе.'
     void (async () => {
       try {
         const settings = await menu?.settingsFor(context)
         const details = settings ? `\nЧат: ${context.title}\n${modelSummary(settings)}` : ''
         status = 'В работе.' + details
-        await send('Принято. Запускаю Codex.' + details)
-        const result = await runTask(text, context, settings)
+        const started = await send('Принято. Запускаю Codex.' + details, button('Остановить задачу', `stop:${task.id}`))
+        task.messageId = started.message_id
+        const result = signal.aborted
+          ? { failure: 'cancelled' }
+          : await runTask(text, context, settings, signal)
+        task.finished = true
+        if (result.failure === 'cancelled') {
+          status = 'Задача остановлена.'
+          await sendResult(status, '', context).catch(() => {})
+          return
+        }
         if (result.failure === 'thread-busy') {
           status = 'Чат занят другой сессией Codex.'
           await sendResult(status, 'Выбери другой чат через /menu.', context)
@@ -75,10 +86,16 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
         const description = result.text || (result.ok ? '' : 'Проверь вход в Codex и состояние проекта на Маке. Задание можно отправить ещё раз.')
         await sendResult(status, description, context)
       } catch {
+        task.finished = true
         status = 'Не удалось выполнить задачу или доставить результат.'
         await send(status).catch(() => {})
       } finally {
-        active = false
+        active = undefined
+        if (task.messageId) {
+          void telegram('editMessageReplyMarkup', {
+            chat_id: owner, message_id: task.messageId, reply_markup: { inline_keyboard: [] },
+          }).catch(() => {})
+        }
       }
     })()
   }
@@ -86,6 +103,14 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
   async function handleCallback(callback) {
     if (!fromOwner(callback.message) || callback.from?.id !== owner) return
     const [action, id] = (callback.data || '').split(':')
+    if (action === 'stop') {
+      if (!active || id !== active.id || active.finished || callback.message.message_id !== active.messageId) {
+        return acknowledge(callback.id, 'Эта задача уже завершилась.')
+      }
+      status = 'Останавливаю задачу.'
+      active.controller.abort()
+      return acknowledge(callback.id, status)
+    }
     if (action === 'menu') {
       const choose = menu?.action(callback)
       if (!choose) return acknowledge(callback.id, 'Открой /menu ещё раз.')
@@ -224,11 +249,12 @@ async function main() {
     saveOwner: owner => state.save('owner', owner),
     transcribe: voiceTranscriber(config, telegram),
     project,
-    async runTask(text, context, settings) {
+    async runTask(text, context, settings, signal) {
       const projectDir = context?.thread && await catalog.resumePath(context)
+      if (signal.aborted) return { failure: 'cancelled' }
       if (!projectDir) return { ok: false, text: 'Чат занят или недоступен. Выбери активный чат в /menu.' }
       const { model, effort, serviceTier } = settings
-      return runCodex(config.codexPath, text, context.thread, { projectDir, model, effort, serviceTier })
+      return runCodex(config.codexPath, text, context.thread, { projectDir, model, effort, serviceTier, signal })
     },
   })
   let offset = 0

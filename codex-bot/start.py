@@ -1,6 +1,7 @@
 import argparse
 import getpass
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -54,7 +55,22 @@ def prompt_credentials():
     return {"token": token, "apiKey": key}
 
 
-def launch(credentials):
+def open_desktop():
+    try:
+        state = json.loads((HERE / "private" / "shared-server.json").read_text())
+        socket = Path(state["socket"])
+        parent = socket.parent.stat()
+    except (OSError, ValueError, KeyError, TypeError):
+        raise RuntimeError("Сначала запусти бота с параметром --shared.")
+    if not socket.is_socket() or parent.st_uid != os.getuid() or parent.st_mode & 0o077:
+        raise RuntimeError("Локальный сокет общего App Server недоступен.")
+    if subprocess.run(["/usr/bin/pgrep", "-x", "ChatGPT"], capture_output=True).returncode == 0:
+        raise RuntimeError("Выйди из Codex через ⌘Q перед подключением к общему серверу.")
+    endpoint = f"ws+unix://localhost{socket}:/rpc"
+    return subprocess.run(["/usr/bin/open", "-b", "com.openai.codex", "--env", f"CODEX_APP_SERVER_WS_URL={endpoint}"]).returncode
+
+
+def launch(credentials, shared=False):
     node = shutil.which("node")
     codex = shutil.which("codex") or (str(BUNDLED_CODEX) if BUNDLED_CODEX.is_file() else None)
     if not node or not codex:
@@ -64,6 +80,7 @@ def launch(credentials):
         "apiKey": credentials["apiKey"],
         "codexPath": codex,
         "workspace": str(HERE.parent),
+        "shared": shared,
     }
     return subprocess.run([node, str(HERE / "bot.mjs")], input=json.dumps(config), text=True).returncode
 
@@ -71,13 +88,17 @@ def launch(credentials):
 def main():
     parser = argparse.ArgumentParser(description="Личный бот Telegram для локального Codex.")
     parser.add_argument("--setup", action="store_true", help="Ввести и сохранить новые ключи.")
+    parser.add_argument("--shared", action="store_true", help="Запустить App Server для Codex Desktop.")
+    parser.add_argument("--desktop", action="store_true", help="Открыть Codex Desktop с общим App Server.")
     args = parser.parse_args()
     try:
+        if args.desktop:
+            return open_desktop()
         credentials = None if args.setup else read_credentials()
         if credentials is None:
             credentials = prompt_credentials()
             store_credentials(credentials)
-        return launch(credentials)
+        return launch(credentials, args.shared)
     except (RuntimeError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1

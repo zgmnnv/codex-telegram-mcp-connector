@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createChatMenu, modelSummary } from './chat-menu.mjs'
 import { createCatalog } from './codex-catalog.mjs'
 import { runCodex } from './codex-task.mjs'
+import { startSharedServer } from './shared-server.mjs'
 import { VoiceError, voiceTranscriber } from './voice.mjs'
 
 function telegramClient(token) {
@@ -27,9 +28,11 @@ function telegramClient(token) {
   }
 }
 
-export function createBot({ telegram, transcribe, runTask, pairingCode, project, pairedOwner, saveOwner = () => {} }) {
+export function createBot({ telegram, transcribe, runTask, pairingCode, project, recovery, pairedOwner, saveOwner = () => {} }) {
   let owner = pairedOwner
   let active
+  let releaseOffer
+  let releasing = false
   let status = 'Заданий пока нет.'
   const drafts = new Map()
   const threads = new Map()
@@ -38,6 +41,9 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
   const button = (text, data) => ({
     reply_markup: { inline_keyboard: [[{ text, callback_data: data }]] },
   })
+  const clearButtons = message_id => telegram('editMessageReplyMarkup', {
+    chat_id: owner, message_id, reply_markup: { inline_keyboard: [] },
+  }).catch(() => {})
   const acknowledge = (id, text) => telegram('answerCallbackQuery', { callback_query_id: id, text }).catch(() => {})
   const fromOwner = message => Number.isInteger(owner) && message?.chat?.type === 'private' && message.chat.id === owner
   const menu = project && createChatMenu({
@@ -46,17 +52,21 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
     edit: (message_id, text, reply_markup) => telegram('editMessageText', { chat_id: owner, message_id, text, reply_markup }),
   })
 
-  async function sendResult(prefix, text, context) {
+  async function sendResult(prefix, text, context, options) {
     const parts = Array.from(text || prefix)
+    let first
     for (let i = 0; i < parts.length; i += 1900) {
       const part = parts.slice(i, i + 1900).join('')
-      const message = await send(i === 0 && text ? `${prefix}\n\n${part}` : part)
+      const message = await send(i === 0 && text ? `${prefix}\n\n${part}` : part, i === 0 ? options : undefined)
+      first ??= message
       if (context?.thread) threads.set(message.message_id, context)
     }
     while (threads.size > 100) threads.delete(threads.keys().next().value)
+    return first
   }
 
   function startTask(text, context) {
+    releaseOffer = undefined
     const task = { id: randomBytes(12).toString('hex'), controller: new AbortController() }
     const { signal } = task.controller
     active = task
@@ -79,7 +89,13 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
         }
         if (result.failure === 'thread-busy') {
           status = 'Чат занят другой сессией Codex.'
-          await sendResult(status, 'Выбери другой чат через /menu.', context)
+          if (context && menu?.current()?.thread === context.thread && await recovery?.holds(context)) {
+            const id = randomBytes(12).toString('hex')
+            const message = await sendResult(status, '', context, button('Освободить чат', `release:${id}`))
+            releaseOffer = { id, context, messageId: message.message_id, stage: 'offer' }
+          } else {
+            await sendResult(status, 'Выбери другой чат через /menu.', context)
+          }
           return
         }
         status = result.ok ? 'Готово.' : 'Codex завершил задачу с ошибкой.'
@@ -91,18 +107,61 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
         await send(status).catch(() => {})
       } finally {
         active = undefined
-        if (task.messageId) {
-          void telegram('editMessageReplyMarkup', {
-            chat_id: owner, message_id: task.messageId, reply_markup: { inline_keyboard: [] },
-          }).catch(() => {})
-        }
+        if (task.messageId) void clearButtons(task.messageId)
       }
     })()
+  }
+
+  async function handleRelease(callback, action, id) {
+    const offer = releaseOffer
+    const stage = action === 'release' ? 'offer' : 'confirmation'
+    if (!offer || id !== offer.id || callback.message.message_id !== offer.messageId
+      || offer.stage !== stage || menu?.current()?.thread !== offer.context.thread || active || releasing) {
+      return acknowledge(callback.id, 'Открой нужный чат и отправь задачу ещё раз.')
+    }
+
+    releaseOffer = undefined
+    void clearButtons(offer.messageId)
+    if (action === 'release-cancel') return acknowledge(callback.id, 'Освобождение отменено.')
+    if (action === 'release') {
+      if (!await recovery.holds(offer.context)) return acknowledge(callback.id, 'Общий сервер больше не удерживает этот чат.')
+      const confirmation = await send(
+        `Освободить «${offer.context.title.slice(0, 120)}»? Codex дождётся завершения всех активных задач на общем сервере. `
+        + 'Затем приложение на Маке временно отключится.',
+        { reply_markup: { inline_keyboard: [[
+          { text: 'Освободить чат', callback_data: `release-confirm:${id}` },
+          { text: 'Отмена', callback_data: `release-cancel:${id}` },
+        ]] } },
+      )
+      releaseOffer = { ...offer, messageId: confirmation.message_id, stage: 'confirmation' }
+      return acknowledge(callback.id)
+    }
+
+    releasing = true
+    status = 'Жду завершения задач Codex.'
+    void (async () => {
+      try {
+        if (await recovery.release(offer.context)) {
+          status = 'Чат освобождён.'
+          await sendResult(status, 'Отправь задачу в течение двух минут. После неё Codex на Маке переподключится.', offer.context)
+        } else {
+          status = 'Общий сервер больше не удерживает этот чат. Попробуй отправить задачу.'
+          await send(status)
+        }
+      } catch {
+        status = 'Не удалось подтвердить освобождение чата.'
+        await send(status).catch(() => {})
+      } finally {
+        releasing = false
+      }
+    })()
+    return acknowledge(callback.id, status)
   }
 
   async function handleCallback(callback) {
     if (!fromOwner(callback.message) || callback.from?.id !== owner) return
     const [action, id] = (callback.data || '').split(':')
+    if (['release', 'release-confirm', 'release-cancel'].includes(action)) return handleRelease(callback, action, id)
     if (action === 'stop') {
       if (!active || id !== active.id || active.finished || callback.message.message_id !== active.messageId) {
         return acknowledge(callback.id, 'Эта задача уже завершилась.')
@@ -126,7 +185,7 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
     if (!draft) return acknowledge(callback.id, 'Пришли голосовое ещё раз.')
     if (action === 'task') {
       if (!draft.text || draft.submitted) return acknowledge(callback.id, 'Этот текст уже использован или недоступен.')
-      if (active) return acknowledge(callback.id, 'Дождись текущей задачи и нажми ещё раз.')
+      if (active || releasing) return acknowledge(callback.id, 'Дождись завершения текущего действия.')
       const context = draft.context ?? menu?.current()
       if (menu && !context?.thread) return acknowledge(callback.id, 'Выбери чат в /menu, затем нажми ещё раз.')
       draft.submitted = true
@@ -191,6 +250,7 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
       : 'Используй /status или пришли задачу обычным сообщением.')
     const text = message.text?.trim()
     if (text && await menu?.acceptTitle(text)) return
+    if (text && releasing) return send(status)
     if (text && active) return send('Сейчас выполняется другая задача. Пришли сообщение ещё раз, когда она завершится.')
     if (text && menu && !context?.thread) return send('Выбери чат в /menu и отправь задачу.')
     if (text) startTask(text, context)
@@ -239,6 +299,23 @@ async function main() {
   const telegram = telegramClient(config.token)
   const pairingCode = randomBytes(8).toString('hex')
   const bot = await telegram('getMe')
+  let shared
+  if (config.shared) {
+    try {
+      shared = await startSharedServer(config.codexPath, workspace, fileURLToPath(new URL('./private/', import.meta.url)))
+    } catch {
+      console.error('Не удалось запустить общий App Server. Проверь, что установлен стабильный Codex CLI 0.171 или новее.')
+      process.exitCode = 1
+      return
+    }
+  }
+  const recovery = shared && {
+    holds: context => shared.holds(context.thread),
+    async release(context) {
+      const chats = await catalog.chats(context.projectId)
+      return chats.some(chat => chat.thread === context.thread) && shared.release(context.thread)
+    },
+  }
   console.log(state.owner
     ? `@${bot.username} запущен. Команда /menu откроет проекты.`
     : `Открой @${bot.username} и отправь /start ${pairingCode}`)
@@ -249,27 +326,41 @@ async function main() {
     saveOwner: owner => state.save('owner', owner),
     transcribe: voiceTranscriber(config, telegram),
     project,
+    recovery,
     async runTask(text, context, settings, signal) {
       const projectDir = context?.thread && await catalog.resumePath(context)
       if (signal.aborted) return { failure: 'cancelled' }
-      if (!projectDir) return { ok: false, text: 'Чат занят или недоступен. Выбери активный чат в /menu.' }
+      if (!projectDir) {
+        if (context && await recovery?.holds(context)) return { failure: 'thread-busy' }
+        return { ok: false, text: 'Чат занят или недоступен. Выбери активный чат в /menu.' }
+      }
       const { model, effort, serviceTier } = settings
-      return runCodex(config.codexPath, text, context.thread, { projectDir, model, effort, serviceTier, signal })
+      const task = () => runCodex(config.codexPath, text, context.thread, { projectDir, model, effort, serviceTier, signal })
+      return shared ? shared.run(context.thread, task) : task()
     },
   })
   let offset = 0
-  for (;;) {
-    try {
-      const updates = await telegram('getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] })
-      for (const update of updates) {
-        offset = update.update_id + 1
-        await handle(update).catch(() => console.error('Не удалось обработать обновление Telegram.'))
+  if (shared) {
+    const close = () => void shared.close().finally(() => process.exit())
+    process.once('SIGINT', close)
+    process.once('SIGTERM', close)
+  }
+  try {
+    for (;;) {
+      try {
+        const updates = await telegram('getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] })
+        for (const update of updates) {
+          offset = update.update_id + 1
+          await handle(update).catch(() => console.error('Не удалось обработать обновление Telegram.'))
+        }
+      } catch (error) {
+        if ([401, 404, 409].includes(error.status)) throw error
+        console.error('Нет связи с Telegram. Повторяю подключение.')
+        await sleep(1000 * (error.retryAfter || 3))
       }
-    } catch (error) {
-      if ([401, 404, 409].includes(error.status)) throw error
-      console.error('Нет связи с Telegram. Повторяю подключение.')
-      await sleep(1000 * (error.retryAfter || 3))
     }
+  } finally {
+    await shared?.close()
   }
 }
 

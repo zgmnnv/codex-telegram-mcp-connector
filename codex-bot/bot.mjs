@@ -98,6 +98,11 @@ export function createBot({ telegram, transcribe, runTask, pairingCode, project,
           }
           return
         }
+        if (result.failure === 'stream-disconnected') {
+          status = 'Связь с моделью Codex прервалась.'
+          await sendResult(status, 'Ответ остался незавершённым. Отправь исходную задачу ещё раз.', context)
+          return
+        }
         status = result.ok ? 'Готово.' : 'Codex завершил задачу с ошибкой.'
         const description = result.text || (result.ok ? '' : 'Проверь вход в Codex и состояние проекта на Маке. Задание можно отправить ещё раз.')
         await sendResult(status, description, context)

@@ -39,6 +39,36 @@ exit 1
   assert.equal(messages.at(-1), 'Чат занят другой сессией Codex.')
 })
 
+test('reports an interrupted stream without forwarding a partial answer', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'codex-stream-test-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const cli = join(directory, 'codex')
+  await writeFile(cli, `#!/bin/sh
+cat >/dev/null
+printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Example partial answer"}}'
+printf '%s\\n' '{"type":"turn.failed","error":{"message":"stream disconnected before completion: network error"}}'
+exit 1
+`, { mode: 0o700 })
+  const messages = []
+  const result = Promise.withResolvers()
+  const bot = createBot({
+    pairedOwner: 42,
+    async telegram(method, params) {
+      if (method === 'sendMessage') {
+        messages.push(params.text)
+        if (messages.length === 2) result.resolve(params.text)
+      }
+      return { message_id: messages.length }
+    },
+    runTask: text => runCodex(cli, text, undefined, { projectDir: directory }),
+  })
+  const send = text => bot({ message: { chat: { id: 42, type: 'private' }, from: { id: 42 }, text } })
+  await send('Run example task')
+  assert.equal(await result.promise, 'Связь с моделью Codex прервалась.\n\nОтвет остался незавершённым. Отправь исходную задачу ещё раз.')
+  await send('/status')
+  assert.equal(messages.at(-1), 'Связь с моделью Codex прервалась.')
+})
+
 test('only the current task can be stopped by the bound owner', async () => {
   const calls = []
   const tasks = []

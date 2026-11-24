@@ -34,8 +34,15 @@ export async function runCodex(codexPath, prompt, previousThread, {
   }
   signal?.addEventListener('abort', interrupt, { once: true })
   let threadBusy = false
+  let streamDisconnected = false
+  function checkStream(message) {
+    if (typeof message === 'string' && message.includes('stream disconnected before completion')) {
+      streamDisconnected = true
+    }
+  }
   const diagnostics = createInterface({ input: child.stderr })
   diagnostics.on('line', line => {
+    checkStream(line)
     if (previousThread && line.includes(`thread ${previousThread} already has an active writer`)) {
       threadBusy = true
     }
@@ -56,13 +63,16 @@ export async function runCodex(codexPath, prompt, previousThread, {
     }
     if (event.type === 'thread.started' && /^[0-9a-f-]{36}$/i.test(event.thread_id)) thread = event.thread_id
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') text = event.item.text
+    if (event.type === 'error') checkStream(event.message)
+    if (event.type === 'turn.failed') checkStream(event.error?.message)
     if (event.type === 'turn.completed') completed = true
   }
   const [code] = await finished
   clearTimeout(forceStop)
   signal?.removeEventListener('abort', interrupt)
   const ok = code === 0 && completed
-  if (!ok && threadBusy) return { thread, ok: false, text, failure: 'thread-busy' }
+  if (!ok && threadBusy) return { thread, ok: false, text: '', failure: 'thread-busy' }
   if (!ok && interrupted) return { thread, ok: false, text: '', failure: 'cancelled' }
-  return { thread, ok, text }
+  if (!ok && streamDisconnected) return { thread, ok: false, text: '', failure: 'stream-disconnected' }
+  return { thread, ok, text: ok ? text : '' }
 }
